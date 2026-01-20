@@ -1,0 +1,11 @@
+# Runtime output
+Logs/
+captures/
+
+# Generated files
+*.png
+*.log
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
