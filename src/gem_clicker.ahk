@@ -59,6 +59,8 @@ deathHoldMs              := 90
 ; Files
 gemLogDir  := A_ScriptDir "\Logs"
 captureDir := A_ScriptDir "\captures"
+adbExePath := "adb.exe"
+adbLogPath := gemLogDir "\adb.log"
 
 ; Death probe (strict RGB); Y from bottom (of CONTENT)
 bannerProbeX           := 5
@@ -105,6 +107,9 @@ lockedHwnd := 0
 lastGems := ""
 lastReturnOCR := ""
 lastDeathOCR := ""
+adbDeviceId := ""
+adbWmWidth := 0
+adbWmHeight := 0
 
 ; -------- Freeze detection state --------
 lastScreenCRC := ""
@@ -203,6 +208,21 @@ return
             Gdip_SaveBitmapToFile(p, captureDir "\probe_" A_Now ".png")
             Gdip_DisposeImage(p)
         }
+    }
+return
+
+; Debug: ADB preflight + screencap/tap [Ctrl+F10]
+^F10::
+    if (!Adb_Preflight()) {
+        TrayTip, ADB, preflight failed (see adb.log), 3
+        return
+    }
+    shot := captureDir "\adb_test_" A_Now ".png"
+    if (Adb_Screencap(shot)) {
+        Adb_Tap(adbWmWidth // 2, adbWmHeight // 2)
+        TrayTip, ADB, % "screencap OK: " shot, 3
+    } else {
+        TrayTip, ADB, screencap failed (see adb.log), 3
     }
 return
 
@@ -580,6 +600,118 @@ CaptureClientToFile(hwnd, path) {
     Gdip_SaveBitmapToFile(p, path)
     Gdip_DisposeImage(p)
     return true
+}
+
+; ---------- ADB backend scaffolding ----------
+Adb_Preflight() {
+    global adbWmWidth, adbWmHeight
+    exe := Adb_ResolveExe()
+    if (!exe) {
+        Adb_Log("adb.exe not found")
+        return false
+    }
+    if (!Adb_SelectDevice()) {
+        Adb_Log("no adb devices detected")
+        return false
+    }
+    out := ""
+    if (Adb_RunWait(Adb_Command("shell wm size"), out) != 0) {
+        Adb_Log("wm size failed")
+        return false
+    }
+    if (RegExMatch(out, "(\d+)x(\d+)", m)) {
+        adbWmWidth := m1
+        adbWmHeight := m2
+        return true
+    }
+    Adb_Log("wm size parse failed: " StrReplace(out, "`r`n", " "))
+    return false
+}
+
+Adb_Screencap(outPath) {
+    if (!outPath)
+        return false
+    cmd := Adb_Command("exec-out screencap -p") " > """ outPath """"
+    Adb_RunWait(cmd)
+    return FileExist(outPath)
+}
+
+Adb_Tap(x, y) {
+    return (Adb_RunWait(Adb_Command("shell input tap " x " " y)) = 0)
+}
+
+Adb_HasDevice() {
+    devices := Adb_GetDevices()
+    return (devices.MaxIndex() ? true : false)
+}
+
+Adb_SelectDevice() {
+    global adbDeviceId
+    devices := Adb_GetDevices()
+    if (!devices.MaxIndex())
+        return false
+    adbDeviceId := devices[1]
+    if (devices.MaxIndex() > 1)
+        Adb_Log("multiple devices detected; using: " adbDeviceId)
+    return true
+}
+
+Adb_GetDevices() {
+    devices := []
+    out := ""
+    if (Adb_RunWait(Adb_RawCommand("devices"), out) != 0)
+        return devices
+    Loop, Parse, out, `n, `r {
+        line := Trim(A_LoopField)
+        if (line = "" || InStr(line, "List of devices attached"))
+            continue
+        if (RegExMatch(line, "O)^(\S+)\s+device$", m))
+            devices.Push(m1)
+    }
+    return devices
+}
+
+Adb_Command(args) {
+    global adbDeviceId
+    exe := Adb_ResolveExe()
+    deviceArg := (adbDeviceId != "") ? " -s """ adbDeviceId """" : ""
+    return """" exe """" deviceArg " " args
+}
+
+Adb_RawCommand(args) {
+    exe := Adb_ResolveExe()
+    return """" exe """ " args
+}
+
+Adb_ResolveExe() {
+    global adbExePath
+    if (FileExist(adbExePath))
+        return adbExePath
+    scriptExe := A_ScriptDir "\adb.exe"
+    if (FileExist(scriptExe))
+        return scriptExe
+    out := ""
+    Adb_RunWait("where adb.exe", out)
+    if (RegExMatch(out, "m)^(.+adb\.exe)$", m))
+        return m1
+    return ""
+}
+
+Adb_RunWait(cmd, ByRef out := "") {
+    out := ""
+    tmp := A_Temp "\adb_out_" A_TickCount ".txt"
+    RunWait, % """" ComSpec """ /C " cmd " > """ tmp """",, Hide
+    if FileExist(tmp) {
+        FileRead, out, %tmp%
+        FileDelete, %tmp%
+    }
+    return ErrorLevel
+}
+
+Adb_Log(msg) {
+    global adbLogPath
+    FormatTime, ts, , yyyy-MM-dd HH:mm:ss
+    FileAppend, % ts " | " msg "`r`n", %adbLogPath%, UTF-8
 }
 
 ; ---------- ntfy (with optional post-send cleanup) ----------
