@@ -633,7 +633,10 @@ Adb_Screencap(outPath) {
         return false
     cmd := Adb_Command("exec-out screencap -p") " > """ outPath """"
     Adb_RunWait(cmd)
-    return FileExist(outPath)
+    if (!FileExist(outPath))
+        return false
+    FileGetSize, size, %outPath%
+    return (size >= 1024)
 }
 
 Adb_Tap(x, y) {
@@ -691,9 +694,6 @@ Adb_ResolveExe() {
     global adbExePath
     if (FileExist(adbExePath))
         return adbExePath
-    scriptExe := A_ScriptDir "\adb.exe"
-    if (FileExist(scriptExe))
-        return scriptExe
     return ""
 }
 
