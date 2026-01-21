@@ -59,8 +59,8 @@ deathHoldMs              := 90
 ; Files
 gemLogDir  := A_ScriptDir "\Logs"
 captureDir := A_ScriptDir "\captures"
-adbExePath := "adb.exe"
-adbLogPath := gemLogDir "\adb.log"
+adbExePath := "C:\LDPllayer\LDPlayer9\adb.exe"
+adbLogPath := gemLogDir "\gem_clicker.log"
 
 ; Death probe (strict RGB); Y from bottom (of CONTENT)
 bannerProbeX           := 5
@@ -214,7 +214,7 @@ return
 ; Debug: ADB preflight + screencap/tap [Ctrl+F10]
 ^F10::
     if (!Adb_Preflight()) {
-        TrayTip, ADB, preflight failed (see adb.log), 3
+        TrayTip, ADB, preflight failed (see gem_clicker.log), 3
         return
     }
     shot := captureDir "\adb_test_" A_Now ".png"
@@ -222,7 +222,7 @@ return
         Adb_Tap(adbWmWidth // 2, adbWmHeight // 2)
         TrayTip, ADB, % "screencap OK: " shot, 3
     } else {
-        TrayTip, ADB, screencap failed (see adb.log), 3
+        TrayTip, ADB, screencap failed (see gem_clicker.log), 3
     }
 return
 
@@ -650,9 +650,13 @@ Adb_SelectDevice() {
     devices := Adb_GetDevices()
     if (!devices.MaxIndex())
         return false
+    if (adbDeviceId != "")
+        return true
+    if (devices.MaxIndex() > 1) {
+        Adb_Log("multiple devices detected; set adbDeviceId to select one")
+        return false
+    }
     adbDeviceId := devices[1]
-    if (devices.MaxIndex() > 1)
-        Adb_Log("multiple devices detected; using: " adbDeviceId)
     return true
 }
 
@@ -690,10 +694,6 @@ Adb_ResolveExe() {
     scriptExe := A_ScriptDir "\adb.exe"
     if (FileExist(scriptExe))
         return scriptExe
-    out := ""
-    Adb_RunWait("where adb.exe", out)
-    if (RegExMatch(out, "m)^(.+adb\.exe)$", m))
-        return m1
     return ""
 }
 
