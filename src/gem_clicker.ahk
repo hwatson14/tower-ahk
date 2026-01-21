@@ -1008,3 +1008,4 @@ return
 __exit:
 Gdip_Shutdown(pToken)
 ExitApp
+
