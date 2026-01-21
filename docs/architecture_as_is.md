@@ -67,3 +67,9 @@ After each click, `CaptureClientCRC` computes a CRC32 for the full client image.
 - **Ctrl+F8/Ctrl+F9**: Manual screenshot test to ntfy and a banner probe snapshot. 【F:src/gem_clicker.ahk†L184-L216】
 - **Esc**: Exit app (shutdown GDI+). 【F:src/gem_clicker.ahk†L217-L221】【F:src/gem_clicker.ahk†L701-L706】
 - **Timers**: `DoClick` is scheduled via a randomized one-shot timer, `ShowCountdown` runs every 60 seconds, and `StateTick` runs every 60 seconds when auto-recovery is enabled. 【F:src/gem_clicker.ahk†L179-L187】【F:src/gem_clicker.ahk†L120-L131】
+
+## Preservation requirements for refactor
+- Click timing distribution must remain unchanged
+- Header-aware content mapping must be preserved
+- OCR ROI semantics must be identical
+- Freeze detection debounce semantics must remain unchanged
