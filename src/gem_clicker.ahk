@@ -631,7 +631,8 @@ Adb_GetDevices() {
     out := ""
     if (Adb_RunWait(Adb_RawCommand("devices"), out) != 0)
         return devices
-    Loop, Parse, out, `n, `r {
+    Loop, Parse, out, `n, `r 
+    {  
         line := Trim(A_LoopField)
         if (line = "" || InStr(line, "List of devices attached"))
             continue
@@ -1009,3 +1010,4 @@ return
 __exit:
 Gdip_Shutdown(pToken)
 ExitApp
+
