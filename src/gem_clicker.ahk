@@ -61,6 +61,7 @@ gemLogDir  := A_ScriptDir "\Logs"
 captureDir := A_ScriptDir "\captures"
 adbExePath := "C:\LDPllayer\LDPlayer9\adb.exe"
 adbLogPath := gemLogDir "\gem_clicker.log"
+ldCapturePath := captureDir "\ld.png"
 
 ; Death probe (strict RGB); Y from bottom (of CONTENT)
 bannerProbeX           := 5
@@ -192,23 +193,7 @@ return
     hwnd := EnsureValidHwnd(lockedHwnd)
     ok := ProbeBannerStrictRGB(hwnd, bannerProbeX, bannerProbeYBottomPct, probeHalf, rgbHex)
     TrayTip, Probe, % "match=" ok " | " rgbHex, 5
-    if GetClientSize(cw, ch, hwnd) {
-        VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-        DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-        ; visualize around computed client point
-        ; Use header-aware Y
-        h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
-        yFromBottomC := Clamp(Round(contentH * (bannerProbeYBottomPct / 100.0)), 0, contentH-1)
-        yClient := h + (contentH - yFromBottomC)
-        sx := NumGet(pt, 0, "Int") + Clamp(bannerProbeX, 0, cw-1)
-        sy := NumGet(pt, 4, "Int") + yClient
-        rect := (sx-7) "|" (sy-7) "|" 15 "|" 15
-        p := Gdip_BitmapFromScreen(rect)
-        if (p) {
-            Gdip_SaveBitmapToFile(p, captureDir "\probe_" A_Now ".png")
-            Gdip_DisposeImage(p)
-        }
-    }
+    CaptureLdToFile(captureDir "\probe_" A_Now ".png")
 return
 
 ; Debug: ADB preflight + screencap/tap [Ctrl+F10]
@@ -218,7 +203,7 @@ return
         return
     }
     shot := captureDir "\adb_test_" A_Now ".png"
-    if (Adb_Screencap(shot)) {
+    if (CaptureLdToFile(shot)) {
         Adb_Tap(adbWmWidth // 2, adbWmHeight // 2)
         TrayTip, ADB, % "screencap OK: " shot, 3
     } else {
@@ -288,7 +273,11 @@ DoClick:
     }
 
     ; jitter, clamped to content vertically
-    h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
+    h := 0, contentH := ch
+    if (GetLdBitmap(pBmp, imgW, imgH)) {
+        h := DetectHeaderH(pBmp, imgW, imgH), contentH := ch - h
+        Gdip_DisposeImage(pBmp)
+    }
     minX := Max(baseX - jitter, 0),              maxX := Min(baseX + jitter, cw-1)
     minY := Max(baseY - jitter, h),              maxY := Min(baseY + jitter, h + contentH - 1)
 
@@ -452,31 +441,16 @@ ProbeBannerStrictRGB(hwnd, xClient, yBottomPct, probeHalf, ByRef outRgbHex := ""
     global colRed, colBlue, colYellow, colGreen, colTol
     outRgbHex := "RGB=?"
 
-    if !GetClientSize(cw, ch, hwnd)
+    if !GetLdBitmap(pBmp, cw, ch)
         return false
 
     ; header-aware Y (content = client minus header)
-    h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
+    h := DetectHeaderH(pBmp, cw, ch), contentH := ch - h
     xClient := Clamp(xClient, 0, cw-1)
     yFromBottomC := Clamp(Round(contentH * (yBottomPct / 100.0)), 0, contentH-1)
     yClient := h + (contentH - yFromBottomC)
 
-    VarSetCapacity(pt, 8, 0)
-    NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    sx := NumGet(pt, 0, "Int") + xClient
-    sy := NumGet(pt, 4, "Int") + yClient
-
-    capX := sx - probeHalf
-    capY := sy - probeHalf
-    capW := 2*probeHalf + 1
-    capH := 2*probeHalf + 1
-    rect := capX "|" capY "|" capW "|" capH
-    pBmp := Gdip_BitmapFromScreen(rect)
-    if !pBmp
-        return false
-
-    ARGB := Gdip_GetPixel(pBmp, probeHalf, probeHalf)  ; 0xAARRGGBB
+    ARGB := Gdip_GetPixel(pBmp, xClient, yClient)  ; 0xAARRGGBB
     Gdip_DisposeImage(pBmp)
 
     r := (ARGB >> 16) & 0xFF
@@ -507,15 +481,11 @@ ReadGemsTesseractPct(hwnd, ByRef ocrOK) {
 
     if (!hwnd)
         return -1
-    if !GetClientSize(cw, ch, hwnd)
+    if !GetLdBitmap(pBmp, cw, ch)
         return -1
 
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    winX := NumGet(pt, 0, "Int"), winY := NumGet(pt, 4, "Int")
-
     ; header-aware ROI
-    h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
+    h := DetectHeaderH(pBmp, cw, ch), contentH := ch - h
 
     sxClient := Round(cw * (leftPct / 100.0))
     yFromBottomC := Round(contentH * (roiTopBottomPct / 100.0))
@@ -523,8 +493,8 @@ ReadGemsTesseractPct(hwnd, ByRef ocrOK) {
     swClient := Round(cw * (widthPct  / 100.0))
     shClient := Round(contentH * (heightPct / 100.0))
 
-    rect := (winX + sxClient) "|" (winY + syClient) "|" swClient "|" shClient
-    pRaw := Gdip_BitmapFromScreen(rect)
+    pRaw := Gdip_CloneBitmapArea(sxClient, syClient, swClient, shClient, pBmp)
+    Gdip_DisposeImage(pBmp)
     if (!pRaw)
         return -1
 
@@ -588,18 +558,10 @@ return
 
 ; ---------- Capture client to PNG ----------
 CaptureClientToFile(hwnd, path) {
-    if !GetClientSize(cw, ch, hwnd)
+    if (!EnsureLdScreencap())
         return false
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    sx := NumGet(pt, 0, "Int"), sy := NumGet(pt, 4, "Int")
-    rect := sx "|" sy "|" cw "|" ch
-    p := Gdip_BitmapFromScreen(rect)
-    if !p
-        return false
-    Gdip_SaveBitmapToFile(p, path)
-    Gdip_DisposeImage(p)
-    return true
+    FileCopy, %ldCapturePath%, %path%, 1
+    return FileExist(path)
 }
 
 ; ---------- ADB backend scaffolding ----------
@@ -714,6 +676,38 @@ Adb_Log(msg) {
     FileAppend, % ts " | " msg "`r`n", %adbLogPath%, UTF-8
 }
 
+EnsureLdScreencap() {
+    global ldCapturePath, captureDir
+    EnsureDir(captureDir)
+    if (!Adb_Screencap(ldCapturePath)) {
+        Adb_Log("screencap failed")
+        TrayTip, ADB, screencap failed (see gem_clicker.log), 3
+        return false
+    }
+    return true
+}
+
+CaptureLdToFile(outPath) {
+    global ldCapturePath
+    if (!EnsureLdScreencap())
+        return false
+    if (outPath = ldCapturePath)
+        return true
+    FileCopy, %ldCapturePath%, %outPath%, 1
+    return FileExist(outPath)
+}
+
+GetLdBitmap(ByRef pBmp, ByRef outW, ByRef outH) {
+    global ldCapturePath
+    if (!EnsureLdScreencap())
+        return false
+    pBmp := Gdip_CreateBitmapFromFile(ldCapturePath)
+    if (!pBmp)
+        return false
+    Gdip_GetImageDimensions(pBmp, outW, outH)
+    return true
+}
+
 ; ---------- ntfy (with optional post-send cleanup) ----------
 SendNtfy(msg, imagePath := "", tags := "", priority := "high", title := "AHK Alert", deleteAfter := true) {
     global ntfyTopic
@@ -762,16 +756,7 @@ AlertFreeze(hwnd, rgbHex := "") {
 ; Capture client and compute CRC32 over raw pixels (no extra copy). Optional save.
 CaptureClientCRC(hwnd, ByRef outCRC, savePath := "") {
     outCRC := ""
-    if !GetClientSize(cw, ch, hwnd)
-        return false
-
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    sx := NumGet(pt, 0, "Int"), sy := NumGet(pt, 4, "Int")
-
-    rect := sx "|" sy "|" cw "|" ch
-    p := Gdip_BitmapFromScreen(rect)
-    if !p
+    if !GetLdBitmap(p, cw, ch)
         return false
 
     ; PixelFormat32bppARGB = 0x26200A, LockMode=3 (read-only).
@@ -798,18 +783,11 @@ CaptureClientCRC(hwnd, ByRef outCRC, savePath := "") {
 
 ; ---------- Header detection + mapping ----------
 ; Detect a low-texture header from the top of the client.
-DetectHeaderH(hwnd, cw, ch, maxScan:=240, samples:=24, sadThresh:=1800, busyRun:=3) {
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    sx := NumGet(pt, 0, "Int"), sy := NumGet(pt, 4, "Int")
+DetectHeaderH(p, cw, ch, maxScan:=240, samples:=24, sadThresh:=1800, busyRun:=3) {
     scanH := (maxScan < ch) ? maxScan : ch
-    p := Gdip_BitmapFromScreen(sx "|" sy "|" cw "|" scanH)
-    if !p
-        return 0
 
     stride := scan0 := 0, bd := 0
     if (Gdip_LockBits(p, 0, 0, cw, scanH, stride, scan0, 0x26200A, 3, bd) != 0 || !scan0) {
-        Gdip_DisposeImage(p)
         return 0
     }
 
@@ -842,7 +820,7 @@ DetectHeaderH(hwnd, cw, ch, maxScan:=240, samples:=24, sadThresh:=1800, busyRun:
         }
     }
 
-    Gdip_UnlockBits(p, bd), Gdip_DisposeImage(p)
+    Gdip_UnlockBits(p, bd)
     return hdrH
 }
 
@@ -851,7 +829,10 @@ ContentPointFromBottomPct(hwnd, xPct, yBottomPct, ByRef outX, ByRef outY) {
     if !GetClientSize(cw, ch, hwnd)
         return false
     static lastHeader := 0
-    h := DetectHeaderH(hwnd, cw, ch)
+    if !GetLdBitmap(pBmp, imgW, imgH)
+        return false
+    h := DetectHeaderH(pBmp, imgW, imgH)
+    Gdip_DisposeImage(pBmp)
     if (Abs(h - lastHeader) <= 2) h := lastHeader  ; debounce tiny jitter
     if (h < 0) h := 0
     if (h >= ch) h := 0
@@ -874,22 +855,18 @@ OCR_TextPct(hwnd, _leftPct, _yBottomPct, _widthPct, _heightPct, _psm, ByRef ok) 
         return ""
     if (!hwnd)
         return ""
-    if !GetClientSize(cw, ch, hwnd)
+    if !GetLdBitmap(pBmp, cw, ch)
         return ""
 
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    winX := NumGet(pt, 0, "Int"), winY := NumGet(pt, 4, "Int")
-
-    h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
+    h := DetectHeaderH(pBmp, cw, ch), contentH := ch - h
     sxClient := Round(cw * (_leftPct / 100.0))
     yFromBottomC := Round(contentH * (_yBottomPct / 100.0))
     syClient := h + (contentH - yFromBottomC)
     swClient := Round(cw * (_widthPct / 100.0))
     shClient := Round(contentH * (_heightPct / 100.0))
 
-    rect := (winX + sxClient) "|" (winY + syClient) "|" swClient "|" shClient
-    pRaw := Gdip_BitmapFromScreen(rect)
+    pRaw := Gdip_CloneBitmapArea(sxClient, syClient, swClient, shClient, pBmp)
+    Gdip_DisposeImage(pBmp)
     if (!pRaw)
         return ""
 
@@ -922,12 +899,8 @@ OCR_TextClientPct(hwnd, _leftPct, _yBottomPct, _widthPct, _heightPct, _psm, ByRe
         return ""
     if (!hwnd)
         return ""
-    if !GetClientSize(cw, ch, hwnd)
+    if !GetLdBitmap(pBmp, cw, ch)
         return ""
-
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    winX := NumGet(pt, 0, "Int"), winY := NumGet(pt, 4, "Int")
 
     sxClient := Round(cw * (_leftPct / 100.0))
     yFromBottom := Round(ch * (_yBottomPct / 100.0))
@@ -935,8 +908,8 @@ OCR_TextClientPct(hwnd, _leftPct, _yBottomPct, _widthPct, _heightPct, _psm, ByRe
     swClient := Round(cw * (_widthPct / 100.0))
     shClient := Round(ch * (_heightPct / 100.0))
 
-    rect := (winX + sxClient) "|" (winY + syClient) "|" swClient "|" shClient
-    pRaw := Gdip_BitmapFromScreen(rect)
+    pRaw := Gdip_CloneBitmapArea(sxClient, syClient, swClient, shClient, pBmp)
+    Gdip_DisposeImage(pBmp)
     if (!pRaw)
         return ""
 
