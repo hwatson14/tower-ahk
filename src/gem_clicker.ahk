@@ -558,7 +558,6 @@ return
 
 ; ---------- Capture client to PNG ----------
 CaptureClientToFile(hwnd, path) {
-    global ldCapturePath
     if (!EnsureLdScreencap())
         return false
     FileCopy, %ldCapturePath%, %path%, 1
@@ -631,8 +630,7 @@ Adb_GetDevices() {
     out := ""
     if (Adb_RunWait(Adb_RawCommand("devices"), out) != 0)
         return devices
-    Loop, Parse, out, `n, `r 
-    {  
+    Loop, Parse, out, `n, `r {
         line := Trim(A_LoopField)
         if (line = "" || InStr(line, "List of devices attached"))
             continue
