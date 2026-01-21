@@ -61,6 +61,10 @@ gemLogDir  := A_ScriptDir "\Logs"
 captureDir := A_ScriptDir "\captures"
 adbExePath := "C:\LDPllayer\LDPlayer9\adb.exe"
 adbLogPath := gemLogDir "\gem_clicker.log"
+adbFramePath := captureDir "\ld.png"
+adbFrameReady := false
+adbVerified := false
+adbFrameTick := 0
 
 ; Death probe (strict RGB); Y from bottom (of CONTENT)
 bannerProbeX           := 5
@@ -123,6 +127,10 @@ F6::
     Toggle := !Toggle
     if (Toggle) {
         lockedHwnd := ResolveLdplayerHwnd() ; lock window once
+        if (!Adb_VerifyHarness(lockedHwnd)) {
+            FailClosed("ADB verification failed; see log")
+            return
+        }
         WinGetTitle, activeTitle, ahk_id %lockedHwnd%
         ToolTip, Human-like tester ON`nTarget Window:`n%activeTitle%`n(F6 toggles off | Esc exits)
         Gosub, DoClick
@@ -140,6 +148,8 @@ F6::
         ToolTip
         lastDeathMsg := "", lastDeathUntil := 0
         lockedHwnd := 0
+        adbFrameReady := false
+        adbVerified := false
         ; reset freeze detection state
         lastScreenCRC := ""
         lastFreezeAt := 0
@@ -162,7 +172,11 @@ F8::
         TrayTip, ReturnTest, no hwnd, 2
         return
     }
-    if (IsReturnToGame(hwnd)) {
+    if (!Adb_UpdateFrame("return-test")) {
+        FailClosed("ADB screencap failed (return-test)")
+        return
+    }
+    if (IsReturnToGame(hwnd, false)) {
         RecoverReturnToGame(hwnd)
         TrayTip, ReturnTest, clicked, 2
     } else {
@@ -179,7 +193,11 @@ F9::
         TrayTip, RetryTest, no hwnd, 2
         return
     }
-    if (IsDeathModal(hwnd)) {
+    if (!Adb_UpdateFrame("retry-test")) {
+        FailClosed("ADB screencap failed (retry-test)")
+        return
+    }
+    if (IsDeathModal(hwnd, false)) {
         RecoverDeath(hwnd)
         TrayTip, RetryTest, clicked, 2
     } else {
@@ -190,6 +208,10 @@ return
 ; Debug probe snapshot (uses lockedHwnd if present) [Ctrl+F9]
 ^F9::
     hwnd := EnsureValidHwnd(lockedHwnd)
+    if (!Adb_UpdateFrame("probe")) {
+        FailClosed("ADB screencap failed (probe)")
+        return
+    }
     ok := ProbeBannerStrictRGB(hwnd, bannerProbeX, bannerProbeYBottomPct, probeHalf, rgbHex)
     TrayTip, Probe, % "match=" ok " | " rgbHex, 5
     if GetClientSize(cw, ch, hwnd) {
@@ -306,6 +328,10 @@ DoClick:
 
     ; OCR & log
     Sleep, 800
+    if (!Adb_UpdateFrame("post-click")) {
+        FailClosed("ADB screencap failed (post-click)")
+        return
+    }
     gems := ReadGemsTesseractPct(hwnd, ocrOK)
     lastGems := (ocrOK ? gems : "[OCR-FAIL]")
     Gosub, ShowCountdown
@@ -352,11 +378,15 @@ StateTick:
         hwnd := ResolveLdplayerHwnd()
     if (!hwnd)
         return
-    if (IsDeathModal(hwnd)) {
+    if (!Adb_UpdateFrame("state-tick")) {
+        FailClosed("ADB screencap failed (state-tick)")
+        return
+    }
+    if (IsDeathModal(hwnd, false)) {
         RecoverDeath(hwnd)
         return
     }
-    if (IsReturnToGame(hwnd)) {
+    if (IsReturnToGame(hwnd, false)) {
         RecoverReturnToGame(hwnd)
         return
     }
@@ -368,6 +398,26 @@ return
 EnsureDir(path) {
     if !FileExist(path)
         FileCreateDir, %path%
+}
+
+FailClosed(reason) {
+    global Toggle, lastDeathMsg, lastDeathUntil, lockedHwnd
+    global adbFrameReady, adbVerified, lastScreenCRC, lastFreezeAt
+    if (Toggle) {
+        Toggle := false
+        SetTimer, DoClick, Off
+        SetTimer, ShowCountdown, Off
+        SetTimer, StateTick, Off
+    }
+    ToolTip
+    lastDeathMsg := "", lastDeathUntil := 0
+    lockedHwnd := 0
+    adbFrameReady := false
+    adbVerified := false
+    lastScreenCRC := ""
+    lastFreezeAt := 0
+    Adb_Log("FAIL-CLOSED: " reason)
+    TrayTip, ADB, % reason, 4
 }
 
 ; Keep only the newest N files matching a pattern (filenames must sort chronologically)
@@ -452,31 +502,15 @@ ProbeBannerStrictRGB(hwnd, xClient, yBottomPct, probeHalf, ByRef outRgbHex := ""
     global colRed, colBlue, colYellow, colGreen, colTol
     outRgbHex := "RGB=?"
 
-    if !GetClientSize(cw, ch, hwnd)
+    if !Adb_LoadFrame(pBmp, fw, fh)
         return false
 
-    ; header-aware Y (content = client minus header)
-    h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
-    xClient := Clamp(xClient, 0, cw-1)
+    ; header-aware Y (content = framebuffer minus header)
+    h := DetectHeaderH_Bitmap(pBmp, fw, fh), contentH := fh - h
+    xClient := Clamp(xClient, 0, fw-1)
     yFromBottomC := Clamp(Round(contentH * (yBottomPct / 100.0)), 0, contentH-1)
     yClient := h + (contentH - yFromBottomC)
-
-    VarSetCapacity(pt, 8, 0)
-    NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    sx := NumGet(pt, 0, "Int") + xClient
-    sy := NumGet(pt, 4, "Int") + yClient
-
-    capX := sx - probeHalf
-    capY := sy - probeHalf
-    capW := 2*probeHalf + 1
-    capH := 2*probeHalf + 1
-    rect := capX "|" capY "|" capW "|" capH
-    pBmp := Gdip_BitmapFromScreen(rect)
-    if !pBmp
-        return false
-
-    ARGB := Gdip_GetPixel(pBmp, probeHalf, probeHalf)  ; 0xAARRGGBB
+    ARGB := Gdip_GetPixel(pBmp, xClient, yClient)  ; 0xAARRGGBB
     Gdip_DisposeImage(pBmp)
 
     r := (ARGB >> 16) & 0xFF
@@ -505,26 +539,25 @@ ReadGemsTesseractPct(hwnd, ByRef ocrOK) {
     if !FileExist(tesseractPath)
         return -1
 
-    if (!hwnd)
+    if !Adb_LoadFrame(pBmp, fw, fh)
         return -1
-    if !GetClientSize(cw, ch, hwnd)
-        return -1
-
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    winX := NumGet(pt, 0, "Int"), winY := NumGet(pt, 4, "Int")
 
     ; header-aware ROI
-    h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
+    h := DetectHeaderH_Bitmap(pBmp, fw, fh), contentH := fh - h
 
-    sxClient := Round(cw * (leftPct / 100.0))
+    sxClient := Round(fw * (leftPct / 100.0))
     yFromBottomC := Round(contentH * (roiTopBottomPct / 100.0))
     syClient := h + (contentH - yFromBottomC)
-    swClient := Round(cw * (widthPct  / 100.0))
+    swClient := Round(fw * (widthPct  / 100.0))
     shClient := Round(contentH * (heightPct / 100.0))
 
-    rect := (winX + sxClient) "|" (winY + syClient) "|" swClient "|" shClient
-    pRaw := Gdip_BitmapFromScreen(rect)
+    sxClient := Clamp(sxClient, 0, fw-1)
+    syClient := Clamp(syClient, 0, fh-1)
+    swClient := Clamp(swClient, 1, fw - sxClient)
+    shClient := Clamp(shClient, 1, fh - syClient)
+
+    pRaw := Gdip_CloneBitmapArea(pBmp, sxClient, syClient, swClient, shClient)
+    Gdip_DisposeImage(pBmp)
     if (!pRaw)
         return -1
 
@@ -588,18 +621,13 @@ return
 
 ; ---------- Capture client to PNG ----------
 CaptureClientToFile(hwnd, path) {
-    if !GetClientSize(cw, ch, hwnd)
+    global adbFramePath
+    if (!Adb_UpdateFrame("capture"))
         return false
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    sx := NumGet(pt, 0, "Int"), sy := NumGet(pt, 4, "Int")
-    rect := sx "|" sy "|" cw "|" ch
-    p := Gdip_BitmapFromScreen(rect)
-    if !p
+    if !FileExist(adbFramePath)
         return false
-    Gdip_SaveBitmapToFile(p, path)
-    Gdip_DisposeImage(p)
-    return true
+    FileCopy, %adbFramePath%, %path%, 1
+    return FileExist(path)
 }
 
 ; ---------- ADB backend scaffolding ----------
@@ -637,6 +665,86 @@ Adb_Screencap(outPath) {
         return false
     FileGetSize, size, %outPath%
     return (size >= 1024)
+}
+
+Adb_UpdateFrame(reason := "") {
+    global adbFramePath, adbFrameReady, adbVerified, adbFrameTick
+    if (!adbVerified) {
+        Adb_Log("frame update blocked (not verified)" (reason ? ": " reason : ""))
+        return false
+    }
+    if (!Adb_Screencap(adbFramePath)) {
+        Adb_Log("screencap failed" (reason ? ": " reason : ""))
+        adbFrameReady := false
+        return false
+    }
+    adbFrameReady := true
+    adbFrameTick := A_TickCount
+    return true
+}
+
+Adb_LoadFrame(ByRef pBmp, ByRef frameW, ByRef frameH) {
+    global adbFramePath, adbFrameReady
+    if (!adbFrameReady || !FileExist(adbFramePath))
+        return false
+    pBmp := Gdip_CreateBitmapFromFile(adbFramePath)
+    if (!pBmp)
+        return false
+    frameW := Gdip_GetImageWidth(pBmp)
+    frameH := Gdip_GetImageHeight(pBmp)
+    return true
+}
+
+Adb_VerifyHarness(hwnd) {
+    global adbFramePath, adbFrameReady, adbVerified, adbWmWidth, adbWmHeight
+    adbVerified := false
+    adbFrameReady := false
+    if (!hwnd) {
+        Adb_Log("verify: no hwnd")
+        return false
+    }
+    if (!Adb_Preflight()) {
+        Adb_Log("verify: preflight failed")
+        return false
+    }
+    if (!Adb_Screencap(adbFramePath)) {
+        Adb_Log("verify: screencap failed")
+        return false
+    }
+    adbFrameReady := true
+    if !Adb_LoadFrame(pBmp, fw, fh) {
+        Adb_Log("verify: load frame failed")
+        return false
+    }
+    if (adbWmWidth && adbWmHeight && (fw != adbWmWidth || fh != adbWmHeight)) {
+        Adb_Log("verify: frame size mismatch (wm=" adbWmWidth "x" adbWmHeight " frame=" fw "x" fh ")")
+        Gdip_DisposeImage(pBmp)
+        return false
+    }
+    if !GetClientSize(cw, ch, hwnd) {
+        Adb_Log("verify: get client size failed")
+        Gdip_DisposeImage(pBmp)
+        return false
+    }
+    arClient := cw / ch
+    arAdb := fw / fh
+    if (Abs(arClient - arAdb) > 0.05) {
+        Adb_Log("verify: aspect ratio mismatch (client=" arClient " adb=" arAdb ")")
+        Gdip_DisposeImage(pBmp)
+        return false
+    }
+    adbHeader := DetectHeaderH_Bitmap(pBmp, fw, fh)
+    Gdip_DisposeImage(pBmp)
+    clientHeader := DetectHeaderH(hwnd, cw, ch)
+    if (ch > 0 && fh > 0) {
+        headerDelta := Abs((clientHeader / ch) - (adbHeader / fh))
+        if (headerDelta > 0.08) {
+            Adb_Log("verify: header ratio mismatch (client=" clientHeader "/" ch " adb=" adbHeader "/" fh ")")
+            return false
+        }
+    }
+    adbVerified := true
+    return true
 }
 
 Adb_Tap(x, y) {
@@ -762,23 +870,14 @@ AlertFreeze(hwnd, rgbHex := "") {
 ; Capture client and compute CRC32 over raw pixels (no extra copy). Optional save.
 CaptureClientCRC(hwnd, ByRef outCRC, savePath := "") {
     outCRC := ""
-    if !GetClientSize(cw, ch, hwnd)
-        return false
-
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    sx := NumGet(pt, 0, "Int"), sy := NumGet(pt, 4, "Int")
-
-    rect := sx "|" sy "|" cw "|" ch
-    p := Gdip_BitmapFromScreen(rect)
-    if !p
+    if !Adb_LoadFrame(pBmp, cw, ch)
         return false
 
     ; PixelFormat32bppARGB = 0x26200A, LockMode=3 (read-only).
     BitmapData := 0
-    status := Gdip_LockBits(p, 0, 0, cw, ch, stride, scan0, 0x26200A, 3, BitmapData)
+    status := Gdip_LockBits(pBmp, 0, 0, cw, ch, stride, scan0, 0x26200A, 3, BitmapData)
     if (status != 0 || !scan0) {
-        Gdip_DisposeImage(p)
+        Gdip_DisposeImage(pBmp)
         return false
     }
 
@@ -786,18 +885,57 @@ CaptureClientCRC(hwnd, ByRef outCRC, savePath := "") {
     crc := DllCall("ntdll\RtlComputeCrc32", "uint", 0, "ptr", scan0, "uint", size, "uint")
 
     ; two-argument unlock per your Gdip_All
-    Gdip_UnlockBits(p, BitmapData)
+    Gdip_UnlockBits(pBmp, BitmapData)
 
     if (savePath != "")
-        Gdip_SaveBitmapToFile(p, savePath)
+        Gdip_SaveBitmapToFile(pBmp, savePath)
 
-    Gdip_DisposeImage(p)
+    Gdip_DisposeImage(pBmp)
     outCRC := Format("{:08X}", crc)
     return true
 }
 
 ; ---------- Header detection + mapping ----------
 ; Detect a low-texture header from the top of the client.
+DetectHeaderH_Bitmap(pBmp, bw, bh, maxScan:=240, samples:=24, sadThresh:=1800, busyRun:=3) {
+    scanH := (maxScan < bh) ? maxScan : bh
+    stride := scan0 := 0, bd := 0
+    if (Gdip_LockBits(pBmp, 0, 0, bw, scanH, stride, scan0, 0x26200A, 3, bd) != 0 || !scan0)
+        return 0
+
+    leftMargin := Max(8, bw//50), rightMargin := Max(8, bw//50)
+    stepX := (samples>1) ? Floor((bw-leftMargin-rightMargin)/(samples-1)) : bw
+    hdrH := 0, busyStreak := 0
+
+    Loop, %scanH% {
+        y := A_Index-1, row := scan0 + y*stride
+        sad := 0, prevY := -1
+        Loop, %samples% {
+            x := leftMargin + (A_Index-1)*stepX
+            if (x >= bw) x := bw-1
+            a := NumGet(row + (x<<2), "UInt")
+            r := (a>>16)&0xFF, g := (a>>8)&0xFF, b := a&0xFF
+            y8 := ( (54*r + 183*g + 19*b) // 256 )
+            if (A_Index>1) {
+                d := y8 - prevY
+                if (d<0) d := -d
+                sad += d
+            }
+            prevY := y8
+        }
+        if (sad < sadThresh) {
+            hdrH++, busyStreak := 0
+        } else {
+            busyStreak++
+            if (busyStreak >= busyRun)
+                break
+        }
+    }
+
+    Gdip_UnlockBits(pBmp, bd)
+    return hdrH
+}
+
 DetectHeaderH(hwnd, cw, ch, maxScan:=240, samples:=24, sadThresh:=1800, busyRun:=3) {
     VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
     DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
@@ -872,24 +1010,23 @@ OCR_TextPct(hwnd, _leftPct, _yBottomPct, _widthPct, _heightPct, _psm, ByRef ok) 
     ok := false
     if !FileExist(tesseractPath)
         return ""
-    if (!hwnd)
-        return ""
-    if !GetClientSize(cw, ch, hwnd)
+    if !Adb_LoadFrame(pBmp, fw, fh)
         return ""
 
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    winX := NumGet(pt, 0, "Int"), winY := NumGet(pt, 4, "Int")
-
-    h := DetectHeaderH(hwnd, cw, ch), contentH := ch - h
-    sxClient := Round(cw * (_leftPct / 100.0))
+    h := DetectHeaderH_Bitmap(pBmp, fw, fh), contentH := fh - h
+    sxClient := Round(fw * (_leftPct / 100.0))
     yFromBottomC := Round(contentH * (_yBottomPct / 100.0))
     syClient := h + (contentH - yFromBottomC)
-    swClient := Round(cw * (_widthPct / 100.0))
+    swClient := Round(fw * (_widthPct / 100.0))
     shClient := Round(contentH * (_heightPct / 100.0))
 
-    rect := (winX + sxClient) "|" (winY + syClient) "|" swClient "|" shClient
-    pRaw := Gdip_BitmapFromScreen(rect)
+    sxClient := Clamp(sxClient, 0, fw-1)
+    syClient := Clamp(syClient, 0, fh-1)
+    swClient := Clamp(swClient, 1, fw - sxClient)
+    shClient := Clamp(shClient, 1, fh - syClient)
+
+    pRaw := Gdip_CloneBitmapArea(pBmp, sxClient, syClient, swClient, shClient)
+    Gdip_DisposeImage(pBmp)
     if (!pRaw)
         return ""
 
@@ -920,23 +1057,22 @@ OCR_TextClientPct(hwnd, _leftPct, _yBottomPct, _widthPct, _heightPct, _psm, ByRe
     ok := false
     if !FileExist(tesseractPath)
         return ""
-    if (!hwnd)
-        return ""
-    if !GetClientSize(cw, ch, hwnd)
+    if !Adb_LoadFrame(pBmp, fw, fh)
         return ""
 
-    VarSetCapacity(pt, 8, 0), NumPut(0, pt, 0, "Int"), NumPut(0, pt, 4, "Int")
-    DllCall("ClientToScreen", "ptr", hwnd, "ptr", &pt)
-    winX := NumGet(pt, 0, "Int"), winY := NumGet(pt, 4, "Int")
+    sxClient := Round(fw * (_leftPct / 100.0))
+    yFromBottom := Round(fh * (_yBottomPct / 100.0))
+    syClient := fh - yFromBottom
+    swClient := Round(fw * (_widthPct / 100.0))
+    shClient := Round(fh * (_heightPct / 100.0))
 
-    sxClient := Round(cw * (_leftPct / 100.0))
-    yFromBottom := Round(ch * (_yBottomPct / 100.0))
-    syClient := ch - yFromBottom
-    swClient := Round(cw * (_widthPct / 100.0))
-    shClient := Round(ch * (_heightPct / 100.0))
+    sxClient := Clamp(sxClient, 0, fw-1)
+    syClient := Clamp(syClient, 0, fh-1)
+    swClient := Clamp(swClient, 1, fw - sxClient)
+    shClient := Clamp(shClient, 1, fh - syClient)
 
-    rect := (winX + sxClient) "|" (winY + syClient) "|" swClient "|" shClient
-    pRaw := Gdip_BitmapFromScreen(rect)
+    pRaw := Gdip_CloneBitmapArea(pBmp, sxClient, syClient, swClient, shClient)
+    Gdip_DisposeImage(pBmp)
     if (!pRaw)
         return ""
 
@@ -961,8 +1097,10 @@ OCR_TextClientPct(hwnd, _leftPct, _yBottomPct, _widthPct, _heightPct, _psm, ByRe
 }
 
 
-IsReturnToGame(hwnd) {
+IsReturnToGame(hwnd, refresh := true) {
     global returnRoiLeftPct, returnRoiYBottomPct, returnRoiWidthPct, returnRoiHeightPct, returnRoiPSM
+    if (refresh && !Adb_UpdateFrame("return-ocr"))
+        return false
     txt := OCR_TextClientPct(hwnd, returnRoiLeftPct, returnRoiYBottomPct, returnRoiWidthPct, returnRoiHeightPct, returnRoiPSM, ok)
     global lastReturnOCR
     lastReturnOCR := txt
@@ -972,9 +1110,11 @@ IsReturnToGame(hwnd) {
     return InStr(t, "TAP") && InStr(t, "RETURN")
 }
 
-IsDeathModal(hwnd) {
+IsDeathModal(hwnd, refresh := true) {
     global deathRoiLeftPct, deathRoiYBottomPct, deathRoiWidthPct, deathRoiHeightPct, deathRoiPSM
     global captureDir, lastDeathOCR
+    if (refresh && !Adb_UpdateFrame("death-ocr"))
+        return false
 
     ; Save a dedicated ROI image on every check (for debugging)
     EnsureDir(captureDir)
